@@ -222,7 +222,10 @@ def download_fundamentals(tickers: list[str]) -> pd.DataFrame:
             netInc = get_metric(statements, ["Net Income"])
             assets = get_metric(statements, ["Total Assets"])
             equity = get_metric(statements, ["Stockholders Equity", "Total Stockholder Equity"])
-            debt = get_metric(statements, ["Total Debt"])
+            debt = get_metric(statements, ["Total Debt", "Long Term Debt And Capital Lease Obligation", 
+                                           "Long Term Debt", "Current Debt"])
+            if isinstance(debt, float) and np.innan(debt): debt = pd.Series(0, index=statements.index())
+            else: debt = debt.fillna(0) 
             curAssets = get_metric(statements, ["Current Assets"])
             curLiab = get_metric(statements, ["Current Liabilities"])
 
@@ -237,7 +240,9 @@ def download_fundamentals(tickers: list[str]) -> pd.DataFrame:
             metricsDf["Free Cash Flow"] = get_metric(statements, ["Free Cash Flow"])
             metricsDf["EBITDA"] = get_metric(statements, ["EBITDA", "Normalized EBITDA"])
             metricsDf["Debt"] = debt
-            metricsDf["Cash"] = get_metric(statements, ["Cash and Cash Equivalents", "Cash Financial"])
+            metricsDf["Cash"] = get_metric(statements, ["Cash and Cash Equivalents", 
+                                                        "Cash Cash Equivalents And Short Term Investments", 
+                                                        "Cash Financial", "Cash"])
 
             metricsDf.index = pd.to_datetime(metricsDf.index) + pd.Timedelta(days=SEC_LAG_DAYS)
             metricsDf.index.name = "Date"
@@ -285,14 +290,42 @@ def build_master_dataset(prices: pd.DataFrame, fred: pd.DataFrame, fundamentals:
     
     ev = master["Market Cap"] + master["Debt"].fillna(0) - master["Cash"].fillna(0)
     master["EV/EBITDA"] = np.where(master["EBITDA"] > 0, ev / master["EBITDA"], np.nan)
+    
+    # ---------------------------------------------------------
+    # HYBRID METRIC GENERATION
+    # ---------------------------------------------------------
+
+    # Macro-Fundamental Interaction (Credit Stress)
+    # Heavily penalizes highly leveraged companies when credit spreads widen
+    master["Credit Stress Exposure"] = master["Debt-to-Equity"] * master["High Yield Credit Spread"]
+
+    # Relative Premium Spreads (FCF vs Risk-Free)
+    master["FCF Yield"] = np.where(master["Market Cap"] > 0, master["Free Cash Flow"] / master["Market Cap"], np.nan)
+    # Convert treasury yield from percentage (e.g., 4.5) to decimal (0.045) for fair comparison
+    master["FCF Risk Premium"] = master["FCF Yield"] - (master["Real 10Y Yield"] / 100)
+
+    # Rolling Macro Betas (Interest Rate Sensitivity)
+    master["Daily Return"] = master.groupby("Ticker")["Adj Close"].pct_change()
+    master["Yield Change"] = master.groupby("Ticker")["10-Year Treasury Yield"].diff()
+
+    # Calculate 63-day rolling covariance and variance
+    rolling_cov = master.groupby("Ticker").apply(lambda x: x["Daily Return"].rolling(63).cov(x["Yield Change"])).reset_index(level=0, drop=True)
+    rolling_var = master.groupby("Ticker")["Yield Change"].transform(lambda x: x.rolling(63).var())
+
+    # Apply your preferred variance floor (0.0001) to avoid division by zero
+    rolling_var = rolling_var.where(rolling_var >= 1e-4, 1e-4).fillna(1e-4)
+    master["10Y Yield Beta"] = rolling_cov / rolling_var
+
+    # Clean up temporary calculation columns
+    master = master.drop(columns=["Daily Return", "Yield Change", "FCF Yield"])
 
     # Drop rows without required modeling fields.
     required_cols = [
-       "Adj Close", "Volume", "10-Year Treasury Yield", "2-Year Treasury Yield", 
-       "Yield Curve Spread", "CPI YoY Inflation", "Federal Funds Rate Delta",
+       "Adj Close", "Volume", "10-Year Treasury Yield", "2-Year Treasury Yield", "10Y Yield Beta",
+       "Yield Curve Spread", "CPI YoY Inflation", "Federal Funds Rate Delta", "FCF Risk Premium",
        "Unemployment Rate Delta", "Financial Stress Index Delta", "Operating Margin",
        "Sector", "Real 10Y Yield", "Month Momentum", "Quarter Momentum", "Month Volatility",
-       "High Yield Credit Spread", "Relative Volume"
+       "High Yield Credit Spread", "Relative Volume", "Credit Stress Exposure" 
     ]
 
     existing_required = [col for col in required_cols if col in master.columns]
