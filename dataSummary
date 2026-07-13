@@ -1,0 +1,157 @@
+from pathlib import Path
+import pandas as pd
+import matplotlib.pyplot as plt
+
+base_folder = Path(__file__).resolve().parent
+file_option_1 = base_folder / "market_data.csv"
+file_option_2 = base_folder / "data" / "market_data.csv"
+
+if file_option_1.exists():
+    csv_file = file_option_1
+elif file_option_2.exists():
+    csv_file = file_option_2
+else:
+    raise FileNotFoundError(
+        "Could not find market_data.csv. Put it next to this file or inside a data folder."
+    )
+
+output_folder = base_folder / "outputs"
+docs_folder = base_folder / "docs"
+
+output_folder.mkdir(exist_ok=True)
+docs_folder.mkdir(exist_ok=True)
+
+data = pd.read_csv(csv_file)
+
+print("First five rows:")
+print(data.head())
+
+data["Date"] = pd.to_datetime(
+    data["Date"].astype(str),
+    format="%Y%m%d%H%M%S",
+    errors="coerce"
+)
+
+summary = pd.DataFrame({
+    "Measurement": [
+        "Number of rows",
+        "Number of columns",
+        "Number of tickers",
+        "Number of sectors",
+        "First date",
+        "Last date",
+        "Total missing values"
+    ],
+    "Result": [
+        len(data),
+        len(data.columns),
+        data["Ticker"].nunique(),
+        data["Sector"].nunique() if "Sector" in data.columns else 0,
+        data["Date"].min().date() if data["Date"].notna().any() else "Date error",
+        data["Date"].max().date() if data["Date"].notna().any() else "Date error",
+        int(data.isna().sum().sum())
+    ]
+})
+
+summary.to_csv(output_folder / "basicDataSummary.csv", index=False)
+
+print("\nBasic dataset summary:")
+print(summary)
+
+missing_values = pd.DataFrame({
+    "Column": data.columns,
+    "Missing Values": data.isna().sum().values
+})
+
+missing_values["Missing Percent"] = missing_values["Missing Values"] / len(data) * 100
+missing_values = missing_values.sort_values("Missing Values", ascending=False)
+missing_values.to_csv(output_folder / "basicMissingValues.csv", index=False)
+
+ticker_counts = (
+    data.groupby("Ticker")
+    .size()
+    .reset_index(name="Number of Rows")
+    .sort_values("Number of Rows", ascending=False)
+)
+
+ticker_counts.to_csv(output_folder / "basicTickerCounts.csv", index=False)
+
+if "Sector" in data.columns:
+    sector_counts = (
+        data.groupby("Sector")["Ticker"]
+        .nunique()
+        .reset_index(name="Number of Tickers")
+        .sort_values("Number of Tickers", ascending=False)
+    )
+    sector_counts.to_csv(output_folder / "basicSectorCounts.csv", index=False)
+else:
+    sector_counts = pd.DataFrame(columns=["Sector", "Number of Tickers"])
+
+plt.figure(figsize=(10, 6))
+plt.bar(ticker_counts["Ticker"], ticker_counts["Number of Rows"])
+plt.title("Number of Dataset Rows for Each Ticker")
+plt.xlabel("Ticker")
+plt.ylabel("Number of Rows")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.close()
+
+first_date = data["Date"].min().date() if data["Date"].notna().any() else "Unknown"
+last_date = data["Date"].max().date() if data["Date"].notna().any() else "Unknown"
+num_tickers = data["Ticker"].nunique()
+num_sectors = data["Sector"].nunique() if "Sector" in data.columns else "Unknown"
+missing_total = int(data.isna().sum().sum())
+
+limitations_text = f"""
+# Slide: Data Limitations
+
+## Main points
+- The final cleaned dataset has {len(data):,} rows, {len(data.columns)} columns, {num_tickers} tickers, and {num_sectors} sectors.
+- The final cleaned date range is {first_date} to {last_date}.
+- The final CSV shows {missing_total} missing values, but this does not mean the raw data was perfect. It may mean incomplete rows were already removed during the dataset-building step.
+- Stock prices are daily, while macroeconomic data and company fundamentals are reported less often.
+- Some macro and fundamental values may be forward-filled, meaning the same value can appear across multiple daily stock rows.
+- Yahoo Finance and public fundamentals may be incomplete, delayed, or different from company filings.
+- The model should be treated as a screening tool, not a final investment decision.
+
+## Explanation
+Our dataset is useful because it combines market prices, company fundamentals, and economic data. However, the sources do not update at the same frequency. This means the model is working with a cleaned and merged version of reality, not a perfect real-time investment database.
+"""
+
+(docs_folder / "slide_data_limitations.md").write_text(limitations_text.strip() + "\n", encoding="utf-8")
+
+plain_english_text = """
+# Slide: Model in Plain English
+
+## Main points
+- The project compares stocks using both company fundamentals and economic conditions.
+- First, the data is cleaned and merged into one Date-Ticker dataset.
+- Next, the model looks for relationships between variables using correlation and feature selection.
+- Then, dimensionality reduction helps simplify many variables into fewer dimensions that are easier to visualize.
+- Clustering groups similar stocks together so companies are compared more like peers instead of comparing every stock the same way.
+- The classification step tries to identify stocks that look unusually cheap or expensive compared with similar stocks.
+- The final validation step helps separate possible buy/sell candidates from stocks that may simply be outliers.
+
+## Explanation
+The model is like a stock screener. It does not automatically know the true value of a company. Instead, it groups similar companies, compares them to their peers, and flags stocks that look unusually cheap or expensive based on the variables we collected.
+"""
+
+(docs_folder / "slide_model_plain_english.md").write_text(plain_english_text.strip() + "\n", encoding="utf-8")
+
+actionability_text = """
+# Slide: Are the Results Actionable?
+
+## Main points
+- We would recommend using the results as a watchlist, but not as automatic buy or sell signals.
+- If we get a resulting undervalued stock it could be worth researching further.
+- A potentially overvalued stock could be a warning sign or a candidate for closer review.
+- The model can help narrow a large stock universe into a smaller list of names to investigate.
+- A real investor would still need to review company news, filings, earnings quality, risk, growth expectations, and valuation assumptions.
+
+## Explanation
+Our model can help answer: “Which stocks deserve a closer look?” It should not answer: “Which stocks should we definitely buy or sell?
+The model should be treated as a screening tool. It can help identify possible candidates for further research, but it should not be treated as a guaranteed investment recommendation.”
+"""
+
+(docs_folder / "slide_actionability.md").write_text(actionability_text.strip() + "\n", encoding="utf-8")
+
