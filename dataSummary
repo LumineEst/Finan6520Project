@@ -17,9 +17,11 @@ else:
 
 output_folder = base_folder / "outputs"
 docs_folder = base_folder / "docs"
+charts_folder = base_folder / "charts"
 
 output_folder.mkdir(exist_ok=True)
 docs_folder.mkdir(exist_ok=True)
+charts_folder.mkdir(exist_ok=True)
 
 data = pd.read_csv(csv_file)
 
@@ -94,6 +96,7 @@ plt.xlabel("Ticker")
 plt.ylabel("Number of Rows")
 plt.xticks(rotation=45)
 plt.tight_layout()
+plt.savefig(charts_folder / "basicTickerCoverage.png", dpi=300)
 plt.close()
 
 first_date = data["Date"].min().date() if data["Date"].notna().any() else "Unknown"
@@ -118,7 +121,10 @@ limitations_text = f"""
 Our dataset is useful because it combines market prices, company fundamentals, and economic data. However, the sources do not update at the same frequency. This means the model is working with a cleaned and merged version of reality, not a perfect real-time investment database.
 """
 
-(docs_folder / "slide_data_limitations.md").write_text(limitations_text.strip() + "\n", encoding="utf-8")
+(docs_folder / "slide_data_limitations.md").write_text(
+    limitations_text.strip() + "\n",
+    encoding="utf-8"
+)
 
 plain_english_text = """
 # Slide: Model in Plain English
@@ -136,22 +142,172 @@ plain_english_text = """
 The model is like a stock screener. It does not automatically know the true value of a company. Instead, it groups similar companies, compares them to their peers, and flags stocks that look unusually cheap or expensive based on the variables we collected.
 """
 
-(docs_folder / "slide_model_plain_english.md").write_text(plain_english_text.strip() + "\n", encoding="utf-8")
+(docs_folder / "slide_model_plain_english.md").write_text(
+    plain_english_text.strip() + "\n",
+    encoding="utf-8"
+)
 
 actionability_text = """
 # Slide: Are the Results Actionable?
 
 ## Main points
 - We would recommend using the results as a watchlist, but not as automatic buy or sell signals.
-- If we get a resulting undervalued stock it could be worth researching further.
+- If we get a resulting undervalued stock, it could be worth researching further.
 - A potentially overvalued stock could be a warning sign or a candidate for closer review.
 - The model can help narrow a large stock universe into a smaller list of names to investigate.
 - A real investor would still need to review company news, filings, earnings quality, risk, growth expectations, and valuation assumptions.
 
 ## Explanation
-Our model can help answer: “Which stocks deserve a closer look?” It should not answer: “Which stocks should we definitely buy or sell?
-The model should be treated as a screening tool. It can help identify possible candidates for further research, but it should not be treated as a guaranteed investment recommendation.”
+Our model can help answer: "Which stocks deserve a closer look?" It should not answer: "Which stocks should we definitely buy or sell?"
+
+The model should be treated as a screening tool. It can help identify possible candidates for further research, but it should not be treated as a guaranteed investment recommendation.
 """
 
-(docs_folder / "slide_actionability.md").write_text(actionability_text.strip() + "\n", encoding="utf-8")
+(docs_folder / "slide_actionability.md").write_text(
+    actionability_text.strip() + "\n",
+    encoding="utf-8"
+)
 
+latest_date = data["Date"].max()
+latest_data = data[data["Date"] == latest_date].copy()
+
+model_columns = [
+    "EV/EBITDA",
+    "Debt-to-Equity",
+    "Free Cash Flow",
+    "ROE",
+    "ROA",
+    "Current Ratio"
+]
+
+for column in model_columns:
+    latest_data[column] = pd.to_numeric(latest_data[column], errors="coerce")
+
+for column in model_columns:
+    sector_mean = latest_data.groupby("Sector")[column].transform("mean")
+    sector_std = latest_data.groupby("Sector")[column].transform("std")
+
+    overall_std = latest_data[column].std()
+
+    if pd.isna(overall_std) or overall_std == 0:
+        overall_std = 1
+
+    sector_std = sector_std.fillna(overall_std).replace(0, overall_std)
+
+    latest_data[f"{column} Sector Z"] = (
+        latest_data[column] - sector_mean
+    ) / sector_std
+
+latest_data["Summary Score"] = (
+    latest_data["EV/EBITDA Sector Z"]
+    + latest_data["Debt-to-Equity Sector Z"]
+    - latest_data["Free Cash Flow Sector Z"]
+    - latest_data["ROE Sector Z"]
+    - latest_data["ROA Sector Z"]
+    - latest_data["Current Ratio Sector Z"]
+)
+
+def classify_stock(score):
+    if score <= -2:
+        return "Potentially Undervalued"
+    elif score >= 2:
+        return "Potentially Overvalued"
+    else:
+        return "Neutral / Needs More Review"
+
+latest_data["Summary Classification"] = latest_data["Summary Score"].apply(
+    classify_stock
+)
+
+result_columns = [
+    "Date",
+    "Ticker",
+    "Sector",
+    "EV/EBITDA",
+    "Free Cash Flow",
+    "Debt-to-Equity",
+    "ROE",
+    "ROA",
+    "Current Ratio",
+    "Summary Score",
+    "Summary Classification"
+]
+
+model_results = latest_data[result_columns].sort_values("Summary Score")
+
+model_results.to_csv(
+    output_folder / "modelResultsSummary.csv",
+    index=False
+)
+
+undervalued_results = model_results[
+    model_results["Summary Classification"] == "Potentially Undervalued"
+].head(5)
+
+overvalued_results = model_results[
+    model_results["Summary Classification"] == "Potentially Overvalued"
+].sort_values("Summary Score", ascending=False).head(5)
+
+undervalued_results.to_csv(
+    output_folder / "potentiallyUndervaluedStocks.csv",
+    index=False
+)
+
+overvalued_results.to_csv(
+    output_folder / "potentiallyOvervaluedStocks.csv",
+    index=False
+)
+
+chart_data = pd.concat([
+    model_results.head(5),
+    model_results.tail(5)
+]).sort_values("Summary Score")
+
+plt.figure(figsize=(11, 6))
+plt.bar(chart_data["Ticker"], chart_data["Summary Score"])
+plt.axhline(-2, linestyle="--", linewidth=1)
+plt.axhline(2, linestyle="--", linewidth=1)
+plt.title("Model Summary Score by Ticker")
+plt.xlabel("Ticker")
+plt.ylabel("Summary Score")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.savefig(charts_folder / "modelResultsSummary.png", dpi=300)
+plt.close()
+
+latest_date_text = latest_date.strftime("%B %d, %Y")
+
+results_text = f"""
+# Slide: Preliminary Model Results
+
+## Latest date used
+{latest_date_text}
+
+## Potentially undervalued stocks
+{undervalued_results[["Ticker", "Sector", "Summary Score"]].to_string(index=False)}
+
+## Potentially overvalued stocks
+{overvalued_results[["Ticker", "Sector", "Summary Score"]].to_string(index=False)}
+
+## Explanation
+The score compares each stock with other stocks in the same sector.
+
+A lower score suggests that the stock looks cheaper or financially stronger than its peers based on EV/EBITDA, debt-to-equity, free cash flow, ROE, ROA, and current ratio.
+
+A higher score suggests that the stock looks more expensive or financially weaker than its peers based on the same variables.
+
+These results should be treated as a watchlist for further research, not as automatic investment recommendations.
+"""
+
+(docs_folder / "slide_model_results.md").write_text(
+    results_text.strip() + "\n",
+    encoding="utf-8"
+)
+
+print("\nPotentially undervalued stocks:")
+print(undervalued_results[["Ticker", "Sector", "Summary Score"]])
+
+print("\nPotentially overvalued stocks:")
+print(overvalued_results[["Ticker", "Sector", "Summary Score"]])
+
+print("\nData summary and model results complete.")
