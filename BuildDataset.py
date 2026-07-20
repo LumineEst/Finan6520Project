@@ -160,7 +160,7 @@ def download_stock_prices(tickers: list[str], start_date: str, end_date: str) ->
             data = data[keep_cols]
             
             daily_returns = np.log(data["Adj Close"] / data["Adj Close"].shift(1))
-            data["Month Volatility"] = daily_returns.rolling(21).std() * np.sqrt(252)
+            data["Month Volatility"] = daily_returns.rolling(21).std()
             data["Relative Volume"] = data["Volume"] / data["Volume"].rolling(21).mean()
             data["Month Momentum"] = np.log(data["Adj Close"] / data["Adj Close"].shift(21))
             data["Quarter Momentum"] = np.log(data["Adj Close"] / data["Adj Close"].shift(63))
@@ -224,7 +224,7 @@ def download_fundamentals(tickers: list[str]) -> pd.DataFrame:
             equity = get_metric(statements, ["Stockholders Equity", "Total Stockholder Equity"])
             debt = get_metric(statements, ["Total Debt", "Long Term Debt And Capital Lease Obligation", 
                                            "Long Term Debt", "Current Debt"])
-            if isinstance(debt, float) and np.innan(debt): debt = pd.Series(0, index=statements.index())
+            if isinstance(debt, (float, int, np.floating)) and np.isnan(debt): debt = pd.Series(0.0, index=statements.index)
             else: debt = debt.fillna(0) 
             curAssets = get_metric(statements, ["Current Assets"])
             curLiab = get_metric(statements, ["Current Liabilities"])
