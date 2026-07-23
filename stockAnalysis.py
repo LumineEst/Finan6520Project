@@ -30,12 +30,12 @@ from sklearn.linear_model import LogisticRegression
 # ============================================
 # GLOBAL CONFIGURATION CONSTANTS
 # ============================================
-randSeed = 37         # Random seed for all stochastic components (Optuna, UMAP, Clustering, Modeling)
+randSeed = 25         # Random seed for all stochastic components (Optuna, UMAP, Clustering, Modeling)
 corrThres = 0.85      # Spearman correlation threshold for pruning highly correlated features
 varMIThres = 0.03     # Minimum mutual information score required for a feature to be retained
 trustThres = 0.75     # Minimum average trustworthiness score for manifold embeddings
 priorWeight = 5       # Bayesian prior weight used in sector-level fundamental smoothing
-numDimStudies = 5    # Number of Optuna trials for dimensionality reduction / clustering selection
+numDimStudies = 10    # Number of Optuna trials for dimensionality reduction / clustering selection
 numModelTrials = 100  # Number of Optuna trials per local classifier (cluster-level models)
 tradeTrials = 250     # Number of Optuna trials to determine optimal trading thresholds
 
