@@ -40,12 +40,33 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 START_DATE = "2019-01-01"
 END_DATE = datetime.today().strftime("%Y-%m-%d")
 
-# Use a smaller starter list while testing. Add more tickers later if needed.
 TICKERS = [
+    # Original companies
     "AAPL", "MSFT", "GOOGL", "AMZN", "META",
     "NVDA", "JPM", "XOM", "JNJ", "PG",
     "HD", "UNH", "V", "MA", "COST",
-    "WMT", "BAC", "KO", "PEP", "DIS"
+    "WMT", "BAC", "KO", "PEP", "DIS",
+
+    # Technology and communication
+    "AVGO", "AMD", "PLTR", "CRWD", "SNOW",
+
+    # Industrials and automobiles
+    "F", "GM", "CAT", "DE", "GE",
+
+    # Healthcare
+    "LLY", "PFE", "MRK", "CVS", "TMO",
+
+    # Utilities
+    "NEE", "DUK", "SO",
+
+    # Energy and materials
+    "SLB", "OXY", "NEM", "FCX",
+
+    # Consumer and growth companies
+    "LULU", "ETSY", "RIVN", "CAVA", "CELH",
+
+    # Financial technology and aerospace
+    "SOFI", "HOOD", "RKLB"
 ]
 
 FORWARD_WINDOW_DAYS = 20
