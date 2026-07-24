@@ -30,12 +30,12 @@ from sklearn.linear_model import LogisticRegression
 # ============================================
 # GLOBAL CONFIGURATION CONSTANTS
 # ============================================
-randSeed = 25         # Random seed for all stochastic components (Optuna, UMAP, Clustering, Modeling)
+randSeed = 37         # Random seed for all stochastic components (Optuna, UMAP, Clustering, Modeling)
 corrThres = 0.85      # Spearman correlation threshold for pruning highly correlated features
 varMIThres = 0.03     # Minimum mutual information score required for a feature to be retained
 trustThres = 0.75     # Minimum average trustworthiness score for manifold embeddings
 priorWeight = 5       # Bayesian prior weight used in sector-level fundamental smoothing
-numDimStudies = 10    # Number of Optuna trials for dimensionality reduction / clustering selection
+numDimStudies = 15    # Number of Optuna trials for dimensionality reduction / clustering selection
 numModelTrials = 100  # Number of Optuna trials per local classifier (cluster-level models)
 tradeTrials = 250     # Number of Optuna trials to determine optimal trading thresholds
 
@@ -711,20 +711,31 @@ def multi_classification(df, features):
 
         # Train two separate classifiers: one for Upside (Buy), one for Downside (Sell)
         for targetVal, probCol, predCol in [(1, 'Buy Prob', 'Predicted Buy'), (-1, 'Sell Prob', 'Predicted Sell')]:
-            # Binary target for this direction: 1 = targetVal, 0 = everything else
-            yLocalTrain = (localDf.loc[trainMaskLocal, 'Target State'] == targetVal).astype(int)
+            # Use only strong up/down labels; drop neutral (0) from training
+            targetTrain = localDf.loc[trainMaskLocal, 'Target State']
+            directionMask = targetTrain.isin([targetVal, -targetVal]).values
+
+            # Not enough labeled examples for this direction in this cluster
+            if directionMask.sum() < 10: continue
+
+            # Restrict training data to up/down only
+            xScaledTrainDir = xScaledTrain[directionMask]
+            xLocalTrainDir = xLocalTrain[directionMask]
+            localDatesTrainDir = localDatesTrain[directionMask]
+            yLocalTrain = (targetTrain.values[directionMask] == targetVal).astype(int)
 
             # Skip directions that are too rare or degenerate for a cluster
-            if yLocalTrain.nunique() < 2 or yLocalTrain.sum() < 3: continue
+            if np.unique(yLocalTrain).size < 2 or yLocalTrain.sum() < 3: continue
+
             cv = TimeSeriesSplit(n_splits=3)
-            
+
             # Tune hyperparameters for both linear and XGBoost experts on this cluster
-            linParams = optimize_cluster_model(xScaledTrain, yLocalTrain, localDatesTrain, isLinear=True)
-            xgbParams = optimize_cluster_model(xLocalTrain, yLocalTrain, localDatesTrain, isLinear=False)
+            linParams = optimize_cluster_model(xScaledTrainDir, yLocalTrain, localDatesTrainDir, isLinear=True)
+            xgbParams = optimize_cluster_model(xLocalTrainDir, yLocalTrain, localDatesTrainDir, isLinear=False)
 
             # Rebuild optimal time-decay weights using tuned half-lives
-            linWeights = calculate_decay_weights(localDatesTrain, hlDays=linParams.pop('hlDays'))
-            xgbBaseWeights = calculate_decay_weights(localDatesTrain, hlDays=xgbParams.pop('hlDays'))
+            linWeights = calculate_decay_weights(localDatesTrainDir, hlDays=linParams.pop('hlDays'))
+            xgbBaseWeights = calculate_decay_weights(localDatesTrainDir, hlDays=xgbParams.pop('hlDays'))
 
             # Re-apply imbalance penalty to optimal XGBoost weights
             posMask = (yLocalTrain == 1)
@@ -733,17 +744,32 @@ def multi_classification(df, features):
             xgbCombinedWeights[posMask] *= xgbRatio
 
             # Rebuild linear expert with tuned hyperparameters
-            linModel = LogisticRegression(C=linParams['cValue'], penalty=linParams['penaltyType'],
-                solver='saga', max_iter=1000, random_state=randSeed, class_weight='balanced')
+            linModel = LogisticRegression(
+                C=linParams['cValue'],
+                penalty=linParams['penaltyType'],
+                solver='saga',
+                max_iter=1000,
+                random_state=randSeed,
+                class_weight='balanced'
+            )
 
             # Rebuild XGBoost expert with tuned hyperparameters
-            xgbModel = xgb.XGBClassifier(max_depth=xgbParams['maxDepth'], learning_rate=xgbParams['learningRate'], n_estimators=xgbParams['nEstimators'],
-                                         gamma=xgbParams['gamma'], reg_alpha=xgbParams['reg_alpha'], reg_lambda=xgbParams['reg_lambda'], random_state=randSeed,
-                                         colsample_bytree=xgbParams['colsample_bytree'], subsample=xgbParams['subsample'], min_child_weight=xgbParams['min_child_weight'])
+            xgbModel = xgb.XGBClassifier(
+                max_depth=xgbParams['maxDepth'],
+                learning_rate=xgbParams['learningRate'],
+                n_estimators=xgbParams['nEstimators'],
+                gamma=xgbParams['gamma'],
+                reg_alpha=xgbParams['reg_alpha'],
+                reg_lambda=xgbParams['reg_lambda'],
+                random_state=randSeed,
+                colsample_bytree=xgbParams['colsample_bytree'],
+                subsample=xgbParams['subsample'],
+                min_child_weight=xgbParams['min_child_weight']
+            )
 
             # Time-series MCC comparison between linear and nonlinear experts
-            linMcc = time_series_mcc_cv(linModel, xScaledTrain, yLocalTrain, cv=cv, sample_weight=linWeights)
-            xgbMcc = time_series_mcc_cv(xgbModel, xLocalTrain, yLocalTrain, cv=cv, sample_weight=xgbCombinedWeights)
+            linMcc = time_series_mcc_cv(linModel, xScaledTrainDir, yLocalTrain, cv=cv, sample_weight=linWeights)
+            xgbMcc = time_series_mcc_cv(xgbModel, xLocalTrainDir, yLocalTrain, cv=cv, sample_weight=xgbCombinedWeights)
 
             dominance = "Linear" if linMcc > xgbMcc else "XGBoost"
             directionLabel = 'Buy' if targetVal == 1 else 'Sell'
@@ -755,58 +781,61 @@ def multi_classification(df, features):
                 expert = linModel
 
                 # Out-of-sample probabilities for training rows (time-series CV)
-                oosProbs = generate_oos_probabilities(expert, xScaledTrain, yLocalTrain, cv=cv, sampleWeight=linWeights)
+                oosProbs = generate_oos_probabilities(expert, xScaledTrainDir, yLocalTrain, cv=cv, sampleWeight=linWeights)
 
                 # Final fit on full training history for this cluster/direction
-                expert.fit(xScaledTrain, yLocalTrain, sample_weight=linWeights)
+                expert.fit(xScaledTrainDir, yLocalTrain, sample_weight=linWeights)
 
                 # Full probability surface over all rows in this cluster
                 fullProbs = expert.predict_proba(XScaled)[:, 1]
-                fullProbs[trainMaskLocal.values] = oosProbs
+
+                # Only overwrite for rows used in training (up/down); others stay at the 0.5 default
+                trainDirMask = np.zeros_like(trainMaskLocal.values, dtype=bool)
+                trainDirMask[trainMaskLocal.values] = directionMask
+                fullProbs[trainDirMask] = oosProbs
 
                 # Store probabilities and signed predictions in main df
                 df.loc[mask, probCol] = fullProbs
                 df.loc[mask, predCol] = expert.predict(XScaled) * targetVal
 
-                # Linear SHAP explainer on standardized features
-                explainer = shap.LinearExplainer(expert, xScaledTrain)
-                shapValues = explainer.shap_values(xScaledTrain)
+                # Linear SHAP explainer on standardized features (up/down subset)
+                explainer = shap.LinearExplainer(expert, xScaledTrainDir)
+                shapValues = explainer.shap_values(xScaledTrainDir)
 
             else:
                 expert = xgbModel
 
                 # Out-of-sample probabilities for training rows (time-series CV)
-                oosProbs = generate_oos_probabilities(expert, xLocalTrain, yLocalTrain, cv=cv, sampleWeight=xgbCombinedWeights)
+                oosProbs = generate_oos_probabilities(expert, xLocalTrainDir, yLocalTrain, cv=cv, sampleWeight=xgbCombinedWeights)
 
                 # Final fit on full training history for this cluster/direction
-                expert.fit(xLocalTrain, yLocalTrain, sample_weight=xgbCombinedWeights)
+                expert.fit(xLocalTrainDir, yLocalTrain, sample_weight=xgbCombinedWeights)
 
                 # Full probability surface over all rows in this cluster
                 fullProbs = expert.predict_proba(XLocal)[:, 1]
-                fullProbs[trainMaskLocal.values] = oosProbs
+
+                trainDirMask = np.zeros_like(trainMaskLocal.values, dtype=bool)
+                trainDirMask[trainMaskLocal.values] = directionMask
+                fullProbs[trainDirMask] = oosProbs
 
                 df.loc[mask, probCol] = fullProbs
                 df.loc[mask, predCol] = expert.predict(XLocal) * targetVal
 
-                # Separate "baseTree" only for SHAP
-                baseTree = xgbModel.fit(xLocalTrain, yLocalTrain, sample_weight=xgbCombinedWeights)
+                # Separate "baseTree" only for SHAP (up/down subset)
+                baseTree = xgbModel.fit(xLocalTrainDir, yLocalTrain, sample_weight=xgbCombinedWeights)
                 explainer = shap.TreeExplainer(baseTree)
-                shapValues = explainer.shap_values(xLocalTrain)
+                shapValues = explainer.shap_values(xLocalTrainDir)
 
             # ---------------------------------
             # Cluster-level SHAP Visualizations
             # ---------------------------------
             if mask.sum() > 300:
-                # For tree-based models, SHAP may return a list [class0, class1]; use class1
                 plotShap = shapValues[1] if isinstance(shapValues, list) else shapValues
 
                 plt.figure(figsize=(8, 5))
 
                 if dominance == "Linear":
-                    # Use signed mean SHAP (impact on log-odds) for top features
                     meanShap = plotShap.mean(axis=0)
-
-                    # Rank by absolute impact while preserving sign
                     topIdx = np.argsort(np.abs(meanShap))[::-1][:10]
                     topFeatures = [modelFeatures[i] for i in topIdx]
                     topValues = meanShap[topIdx]
@@ -814,14 +843,12 @@ def multi_classification(df, features):
                     penalty = getattr(expert, 'penalty', None)
                     linType = "Lasso" if penalty == 'l1' else "Ridge"
 
-                    # Color bars by mean standardized feature value to show directionality
-                    meanFeatVal = np.asarray(xScaledTrain.mean(axis=0), dtype=float)
+                    meanFeatVal = np.asarray(xScaledTrainDir.mean(axis=0), dtype=float)
                     topFeatVals = meanFeatVal[topIdx]
                     norm = plt.Normalize(vmin=topFeatVals.min(), vmax=topFeatVals.max())
                     cmap = shap.plots.colors.red_blue
                     colors = [cmap(norm(v)) for v in topFeatVals]
 
-                    # Generate a simplified "SHAP-styled" Bar Plot for Linear Dominant
                     fig, ax = plt.subplots(figsize=(8, 5))
                     sns.barplot(x=topValues, y=topFeatures, palette=colors, ax=ax)
                     ax.axvline(0, color="black", linewidth=1)
@@ -835,8 +862,7 @@ def multi_classification(df, features):
                     plt.show()
 
                 else:
-                    # For XGBoost, use the richer beeswarm summary plot for SHAP
-                    shap.summary_plot(plotShap, xLocalTrain, feature_names=modelFeatures, show=False)
+                    shap.summary_plot(plotShap, xLocalTrainDir, feature_names=modelFeatures, show=False)
                     plt.title(f"SHAP Directional Impact: Cluster {clusterId} ({directionLabel} XGBoost Model)")
                     plt.tight_layout()
                     plt.show()
@@ -847,42 +873,32 @@ def multi_classification(df, features):
             # -------------------------------
             # SHAP Top-5 extraction per model
             # -------------------------------
-            meanShap = np.abs(shapValues[1] if isinstance(shapValues, list) else shapValues).mean(axis=0)
-            topIdx = np.argsort(meanShap)[-5:][::-1]
+            meanShapAbs = np.abs(shapValues[1] if isinstance(shapValues, list) else shapValues).mean(axis=0)
+            topIdx = np.argsort(meanShapAbs)[-5:][::-1]
             topFeaturesList = [modelFeatures[i] for i in topIdx]
             clusterLabel = f"Cluster {clusterId}"
 
-            # Store MCC comparison and dominance metadata
             clusterResults.append({
                 'clusterId': clusterId,
-                'direction': directionLabel,   # 'Buy' or 'Sell'
+                'direction': directionLabel,
                 'linMcc': linMcc,
                 'xgbMcc': xgbMcc,
                 'dominance': dominance,
                 'clusterLabel': clusterLabel,
             })
 
-            # Store SHAP summary for later global matrix visualization
             shapVisuals.append({
                 'Model': f"Cluster {clusterId} ({directionLabel})",
-                'Top 5': list(zip(topFeaturesList, [meanShap[i] for i in topIdx])),
-                'Raw SHAP': meanShap,
+                'Top 5': list(zip(topFeaturesList, [meanShapAbs[i] for i in topIdx])),
+                'Raw SHAP': meanShapAbs,
                 'Weight': len(XLocal),
             })
-    
-    # ----------------------------------------------
-    # Combined scores: classification * directional alpha (A.1)
-    # ----------------------------------------------
-    # Positive and negative components of predicted alpha
-    posAlpha = df['Pred Alpha'].clip(lower=0).fillna(0.0)          # upside only
-    negAlpha = (-df['Pred Alpha']).clip(lower=0).fillna(0.0)       # downside only
-    
-    # Long and short scores
-    df['Buy Score'] = df['Buy Prob'].fillna(0.0) * posAlpha
-    df['Sell Score'] = df['Sell Prob'].fillna(0.0) * negAlpha
-    
+
+    df['Buy Score'] = df['Pred Alpha'].fillna(0.0)
+    df['Sell Score'] = -df['Pred Alpha'].fillna(0.0)
+        
     # ===========================================
-    # Linear vs XGBoost MCC comparison (combined)
+    # Linear vs XGBoost MCC comparison
     # ===========================================
     if clusterResults:
         # Aggregate per-cluster MCC results into a DataFrame for plotting
